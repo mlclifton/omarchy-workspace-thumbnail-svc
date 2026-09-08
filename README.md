@@ -17,7 +17,7 @@ ready-made thumbnail component so they stop reimplementing one each.
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/mlclifton/omarchy-workspace-thumbnails.git
+omarchy plugin add https://github.com/mlclifton/omarchy-workspace-thumbnail-svc.git
 ```
 
 A service is enabled by a top-level entry in `~/.config/omarchy/shell.json`:
