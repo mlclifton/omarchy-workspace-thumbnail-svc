@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "mlclifton.workspace-thumbnails",
+  "name": "Workspace Thumbnails",
+  "version": "0.1.0",
+  "author": "Mike Clifton",
+  "license": "MIT",
+  "homepage": "https://github.com/mlclifton/omarchy-workspace-thumbnails",
+  "description": "Shared service providing monitor-shaped workspace thumbnails. Empty workspaces render the current wallpaper as a placeholder at the monitor's own aspect ratio.",
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}
