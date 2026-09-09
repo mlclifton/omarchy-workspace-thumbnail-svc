@@ -1,8 +1,8 @@
 # Workspace Thumbnails
 
-A shared Omarchy **service** that renders monitor-shaped thumbnails of Hyprland
-workspaces. It has no bar widget and no UI of its own — it hands other plugins a
-ready-made thumbnail component so they stop reimplementing one each.
+A component that renders monitor-shaped thumbnails of Hyprland workspaces for an
+Omarchy plugin. It has no UI of its own — it hands its host a ready-made
+thumbnail component instead of that plugin reimplementing one.
 
 - Each thumbnail uses **its own monitor's aspect ratio**, with the bar's reserved
   space subtracted — an ultrawide workspace looks ultrawide, a portrait monitor
@@ -12,34 +12,49 @@ ready-made thumbnail component so they stop reimplementing one each.
   caller says which monitor they belong to.
 - Windows are drawn as live screencopy tiles at their real positions, including
   on **workspaces you are not currently looking at**.
-- The wallpaper tracks theme switches, read from the `omarchy.background` service.
 
-## Install
+## This is not an installable plugin
+
+**Do not run `omarchy plugin add` on this repo.** It has no `manifest.json`.
+
+Omarchy 4.0.3 restricted third-party plugins to looking up their *own* service,
+so a shared thumbnail service is no longer reachable by anyone. This repo is
+therefore vendored into its consumer and mounted under that plugin's id.
+
+That restriction landed as a security fix (upstream PR 9618). It is not coming
+back, and there is no manifest flag that opts out. The full reasoning, and the
+code path that enforces it, are in
+[IMPLEMENTATION.md](IMPLEMENTATION.md#why-this-is-vendored).
+
+## Install into a consumer
 
 ```sh
-omarchy plugin add https://github.com/mlclifton/omarchy-workspace-thumbnail-svc.git
+./install.sh ~/Projects/mybarwidget
 ```
 
-A service is enabled by a top-level entry in `~/.config/omarchy/shell.json`:
+That copies `Service.qml`, `WorkspaceThumbnail.qml`, `WindowTile.qml` and
+`lib/Geometry.js` into `<consumer>/thumbnails/`, then checks the consumer's
+manifest declares the service. Merge `manifest.fragment.json` into that manifest
+first:
 
 ```json
-{ "plugins": [ { "id": "mlclifton.workspace-thumbnails" } ] }
+{
+  "kinds": ["bar-widget", "service"],
+  "keepLoaded": true,
+  "entryPoints": { "service": "thumbnails/Service.qml" }
+}
 ```
 
-Then `omarchy restart shell`. Confirm it loaded with:
+Re-run `install.sh` after any change here to carry it across.
 
-```sh
-omarchy plugin list | grep thumbnails    # enabled  third-party  service
-```
+## Using it from the host plugin
 
-Nothing will appear on screen by itself — a consumer plugin has to ask for a
-thumbnail.
-
-## Using it from a plugin
+The host asks for **its own plugin id**, because that is what the service is
+mounted under:
 
 ```qml
 readonly property var thumbs: bar && bar.shell && typeof bar.shell.serviceFor === "function"
-  ? bar.shell.serviceFor("mlclifton.workspace-thumbnails") : null
+  ? bar.shell.serviceFor("mlclifton.workspaces") : null
 
 Loader {
   sourceComponent: thumbs ? thumbs.thumbnailComponent : null
@@ -54,7 +69,8 @@ Loader {
 | --- | --- |
 | `frameFor(id, monitorName)` | Frame descriptor for one workspace. `monitorName` is the connector the caller believes it belongs to, which is what shapes a workspace that does not exist yet. |
 | `aspectForMonitor(name)` | The monitor's aspect alone, for sizing a container before building a frame. |
-| `wallpaper` | Current wallpaper URL, live. |
+| `wallpaper` | Current wallpaper URL. |
+| `refreshWallpaper()` | Re-reads the wallpaper. Call it as a preview opens; nothing pushes theme changes any more. |
 | `thumbnailComponent` | `WorkspaceThumbnail` with the window tile already wired in. |
 
 `frameFor()` never returns null: with no compositor state at all you still get a
@@ -65,7 +81,7 @@ it letterboxes itself to the monitor's aspect inside it.
 
 ## Requirements
 
-- Omarchy with the Quickshell bar, and Hyprland
+- Omarchy 4.0.3 or later with the Quickshell bar, and Hyprland
 - No additional services or packages
 
 ## Development
@@ -75,17 +91,19 @@ tests/run.sh          # full suite: structure, node units, qmllint, qmltestrunne
 tests/run.sh unit     # fast loop
 ```
 
-The suite runs headless with no compositor. See [IMPLEMENTATION.md](IMPLEMENTATION.md)
-for the architecture, the layering rules the tests enforce, and the manual
+The suite runs headless with no compositor, against the files in this repo
+rather than the vendored copies. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for
+the architecture, the layering rules the tests enforce, and the manual
 verification recipe.
 
 ## Removal
 
-```sh
-omarchy plugin remove mlclifton.workspace-thumbnails
-```
+Delete the vendored directory from the consumer and drop the `service` entry
+from its manifest:
 
-Remember to drop its entry from `shell.json`'s `plugins[]` too.
+```sh
+rm -rf ~/Projects/mybarwidget/thumbnails
+```
 
 ## License
 

@@ -5,8 +5,8 @@ whatever) picks this up next — read this before changing code.
 
 ## What this is and why it exists
 
-A **service** plugin that renders monitor-shaped thumbnails of Hyprland
-workspaces. It draws nothing itself; it hands consumers a component.
+A **service** that renders monitor-shaped thumbnails of Hyprland workspaces. It
+draws nothing itself; it hands its consumer a component.
 
 It exists because four installed plugins had each independently reimplemented
 the same thumbnail:
@@ -21,7 +21,41 @@ the same thumbnail:
 None of them shared anything, and Omarchy has no cross-plugin preview API. A
 bar widget cannot reach into another plugin's directory either —
 `PluginRegistry.isSafeEntryPoint` / `entryPointUrl` sandbox entry points to
-their own `sourceDir`. A service is the supported way across that boundary.
+their own `sourceDir`. A service *was* the supported way across that boundary.
+It no longer is. Read the next section before anything else.
+
+## Why this is vendored
+
+**This repo is not an installable plugin. It has no `manifest.json`.** It is a
+component that gets copied into its consumer's plugin directory by `install.sh`
+and mounted under *that plugin's* id.
+
+Omarchy 4.0.3 closed cross-plugin service access. Third-party entry points used
+to receive the raw shell root, so `serviceFor(anyId)` worked. They now receive a
+capability-scoped facade, `shell/services/PluginShellApi.qml`, whose
+`serviceFor` routes through `pluginServiceFor` in `shell.qml`. That first calls
+`pluginOwnsTarget`, which returns true only when the requested id resolves to
+the **calling plugin's own id**. Asking for anyone else returns null, silently.
+
+This was a security fix, not an accident: upstream PR 9618, "Restrict
+third-party plugin access to authentication services", merged 2026-09-07 on a
+report from Roger Piñol. The same injection point that let this service be
+shared also let any plugin reach `omarchy.lock` and `omarchy.polkit`. Do not
+expect it back. The upstream docs describe the restriction from the replacement
+bar's perspective, but `pluginOwnsTarget` applies under the built-in bar too.
+
+There is no escape hatch. `__hostCapabilities` is stamped only onto first-party
+manifests by `PluginRegistry.qml`, and the narrow first-party proxy allowlist
+(`omarchy.idle`, `omarchy.media`, `omarchy.nightlight`, `omarchy.notifications`)
+additionally requires the caller to declare kind `bar`.
+
+So the service ships **inside** its consumer, and the consumer looks up itself.
+The repos stay separate for encapsulation; `install.sh` carries code across.
+The three-layer split below is unaffected, because it never depended on the
+plugin boundary. All four test lanes still run here, against these files.
+
+**If you add a second consumer, it vendors its own copy.** There is no longer a
+way for two plugins to share one live service instance.
 
 ## The one hard rule: three layers, and why
 
@@ -86,9 +120,12 @@ is a 16:9 wallpaper-only frame, so consumers never need a null branch.
 
 ## Consuming the service
 
+The consumer asks for **its own plugin id**, because the service is vendored
+into it and mounted under that id:
+
 ```qml
 readonly property var thumbs: bar && bar.shell && typeof bar.shell.serviceFor === "function"
-  ? bar.shell.serviceFor("mlclifton.workspace-thumbnails") : null
+  ? bar.shell.serviceFor("mlclifton.workspaces") : null
 
 Loader {
   sourceComponent: thumbs ? thumbs.thumbnailComponent : null
@@ -105,12 +142,13 @@ Surface:
 | --- | --- |
 | `frameFor(id, monitorName)` | frame descriptor; `monitorName` shapes uncreated workspaces |
 | `aspectForMonitor(name)` | just the aspect, for sizing a popup before building a frame |
-| `wallpaper` | live URL, tracks theme switches |
+| `wallpaper` | current URL; call `refreshWallpaper()` to re-read it |
+| `refreshWallpaper()` | re-reads the symlink; call it as a preview opens |
 | `thumbnailComponent` | `WorkspaceThumbnail` with `WindowTile` already injected |
 | `revision` | change counter; see below |
 
-`thumbnailComponent` exists so consumers never hardcode a path into this
-plugin's directory, and so `WindowTile` gets wired in without
+`thumbnailComponent` exists so consumers never hardcode a path into the
+vendored directory, and so `WindowTile` gets wired in without
 `WorkspaceThumbnail.qml` importing Wayland.
 
 ### Why `revision` exists
@@ -126,16 +164,24 @@ silently stop updating.** This is the same trick as the `sink` loop in
 
 ## Service loading mechanics
 
-- `manifest.kinds` must contain `"service"` with `entryPoints.service`.
-- `shell.qml` (`ensureService`, ~line 285) loads it generically and injects
+- The **consumer's** `manifest.kinds` must contain both `"bar-widget"` and
+  `"service"`, with `entryPoints.service` pointing at the vendored copy
+  (`thumbnails/Service.qml`). `manifest.fragment.json` here is the source of
+  truth for what to merge; `install.sh` checks the target against it.
+- Subdirectory entry points are fine. `isSafeEntryPoint` rejects only absolute
+  paths and `..`, and `entryPointUrl` re-checks the result stays in `sourceDir`.
+- `shell.qml` (`ensureService`, ~line 901) loads it generically and injects
   `shell`, `manifest`, `pluginRegistry`, `barWidgetRegistry` if those properties
   exist. This file declares `shell` and `manifest`.
-- **A third-party service is only enabled by an entry in `shell.json`'s
-  top-level `plugins[]` array.** Being installed is not enough; it will silently
-  never load.
+- **A bar widget's own entry in `bar.layout` is enough to enable it.**
+  `isEnabled` counts any reference in `shell.json`, so a merged widget+service
+  plugin needs no `plugins[]` entry. The old standalone service did, and that
+  entry has been removed.
 - `shell.serviceFor(id)` returns a **single global instance**, not one per
   monitor. That is fine for popups because `PopupCard` anchors off
   `anchorItem.QsWindow.window`, so the popup still lands on the anchor's screen.
+- `pluginShellFor` passes `allowOwnService = true` (`shell.qml:743`), which is
+  what makes the own-id lookup resolve at all.
 
 ## Gotchas that cost time
 
@@ -147,9 +193,19 @@ silently stop updating.** This is the same trick as the `sink` loop in
 2. **The wallpaper is global, not per-monitor.**
    `~/.local/state/omarchy/current/background` is one symlink, and
    `Background.qml` paints the same path across a `Variants` over all screens.
-   Read it from the `omarchy.background` service rather than polling the
-   symlink; the `readlink` `Process` here is only a fallback for when that
-   service has not resolved a path yet.
+
+   Reading it from the `omarchy.background` service *was* the right way. Omarchy
+   4.0.3 took that away too: it is another plugin, so the own-id rule blocks it,
+   and it is not on the narrow first-party allowlist. **The `readlink` `Process`
+   is now the live source, not a fallback.** The lookup is still attempted
+   because it costs nothing and would resume working if the boundary reopened.
+
+   Nothing pushes theme changes at us any more, and `Background.qml` has no
+   polling timer to imitate — it refreshes on IPC we cannot receive. Rather than
+   run a timer all session, `refreshWallpaper()` is public and the consumer calls
+   it as a preview opens. Theme switches are rare, hover is not, and a `readlink`
+   is cheap. If you make a frame depend on something else external, decide the
+   same way: pull on demand beats polling.
 3. **Hyprland 0.56.2 uses the Lua dispatcher API.** Legacy
    `hyprctl dispatch workspace 3` is a Lua syntax error now. The working form is
    `hyprctl dispatch 'hl.dsp.focus({ workspace = "3" })'`. This matters for any
@@ -160,6 +216,11 @@ silently stop updating.** This is the same trick as the `sink` loop in
    containing a `qs` symlink on the import path. `tests/run.sh` builds one in a
    tempdir.
 5. **`Style.space()` is theme-scaled**, not pixels. Never hardcode.
+6. **`keepLoaded: true` defeats hot-reload for the service.** The consumer's
+   manifest carries it, and omarchy-shell deliberately does not replace a kept
+   instance, so edits to `Service.qml` need a full `omarchy restart shell` — a
+   plugin rescan will appear to do nothing. The widget half still hot-reloads,
+   which makes this confusing in exactly the wrong way.
 
 ## Testing
 
@@ -225,24 +286,37 @@ differ. This machine is `HDMI-A-1` at x=-1920, `DP-1` at x=0 (ultrawide
 
 ## Install for development
 
-There is no `omarchy plugin` dev-link subcommand, so copy and enable:
+Vendor into the consumer, then install the consumer:
 
 ```bash
-DEST=~/.config/omarchy/plugins/mlclifton.workspace-thumbnails
-mkdir -p "$DEST" && cp -r manifest.json *.qml lib LICENSE "$DEST/"
-# then add {"id": "mlclifton.workspace-thumbnails"} to shell.json's plugins[]
+./install.sh ~/Projects/mybarwidget          # copies code, checks their manifest
+cd ~/Projects/mybarwidget && ./test_structure.sh
+DEST=~/.config/omarchy/plugins/mlclifton.workspaces
+cp BarWidget.qml manifest.json test_structure.sh "$DEST/"
+mkdir -p "$DEST/thumbnails/lib"
+cp thumbnails/*.qml "$DEST/thumbnails/" && cp thumbnails/lib/*.js "$DEST/thumbnails/lib/"
 omarchy restart shell
 ```
 
 Confirm it actually loaded — a service that fails to load is silent:
 
 ```bash
-omarchy plugin list | grep thumbnails      # expect: enabled third-party service
+omarchy plugin list | grep workspaces       # expect kinds: bar-widget,service
 journalctl --user --since "2 minutes ago" | grep -i "service plugin load failed"
 ```
+
+`omarchy restart shell` has been seen to race: the replacement refuses with
+"An instance of this configuration is already running", then the old one exits
+on the IPC request, leaving nothing up. If the bar vanishes, relaunch with
+`hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")'`.
 
 ## History
 
 - Built 2026-09-08 after auditing the four duplicate implementations above.
-- First consumer is the `jordan.workspaces` fork at `~/Projects/mybarwidget`;
-  see its `implementation.md` for the hover wiring.
+- **2026-09-09: stopped being a plugin.** Omarchy 4.0.3 closed cross-plugin
+  `serviceFor`, so this became a vendored component. See "Why this is vendored".
+  The standalone `mlclifton.workspace-thumbnails` install and its `plugins[]`
+  entry were removed. The `omarchy.background` read broke in the same change.
+- Sole consumer is the `jordan.workspaces` fork at `~/Projects/mybarwidget`
+  (plugin id `mlclifton.workspaces`); see its `implementation.md` for the hover
+  wiring.

@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Not a plugin manifest. This is the fragment a consuming plugin must merge",
+    "into its own manifest.json so omarchy-shell mounts the vendored service.",
+    "install.sh checks the target manifest against these values.",
+    "The service takes the CONSUMER's plugin id, which is what lets its widget",
+    "reach it via serviceFor(); since Omarchy 4.0.3 a third-party plugin can",
+    "only look up its own service."
+  ],
+  "kinds": ["service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "thumbnails/Service.qml"
+  }
+}

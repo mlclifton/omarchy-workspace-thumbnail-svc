@@ -6,13 +6,17 @@ import Quickshell.Io
 import Quickshell.Hyprland
 import "lib/Geometry.js" as Geometry
 
-// Workspace thumbnails, as a shared service.
+// Workspace thumbnails, as a service.
 //
 // Loaded by omarchy-shell's generic service loader (shell.qml ensureService)
-// because the manifest declares kind "service". Any plugin reaches it with:
+// because the hosting manifest declares kind "service".
+//
+// IMPORTANT: this file is vendored into its consumer's plugin directory and
+// shares that plugin's id. Since Omarchy 4.0.3 a third-party plugin can only
+// look up its OWN service, so the consumer asks for itself:
 //
 //   readonly property var thumbs: bar && bar.shell
-//     ? bar.shell.serviceFor("mlclifton.workspace-thumbnails") : null
+//     ? bar.shell.serviceFor("mlclifton.workspaces") : null
 //
 // and then renders one with:
 //
@@ -23,6 +27,9 @@ import "lib/Geometry.js" as Geometry
 //       item.wallpaper = Qt.binding(function() { return thumbs.wallpaper })
 //     }
 //   }
+//
+// See IMPLEMENTATION.md ("Why this is vendored") for why it is no longer a
+// standalone plugin.
 //
 // This file owns everything singleton-shaped: Hyprland lookups, the wallpaper
 // source, and the change signal consumers bind against. The maths lives in
@@ -44,9 +51,11 @@ Item {
 
   // ---------------------------------------------------------------- wallpaper
   //
-  // omarchy.background is itself a service and already tracks the current
-  // wallpaper across theme switches, so read it rather than polling the
-  // symlink. It may not be constructed yet when we are, hence the fallback.
+  // omarchy.background already tracks the wallpaper across theme switches, so
+  // reading it beats polling the symlink. Omarchy 4.0.3 put it out of reach:
+  // a third-party plugin may only look up its own service, and the narrow
+  // first-party allowlist does not include omarchy.background. The lookup is
+  // kept because it costs nothing and resumes working if that ever reopens.
   readonly property var backgroundService: root.shell && typeof root.shell.serviceFor === "function"
     ? root.shell.serviceFor("omarchy.background") : null
   property string fallbackBackgroundPath: ""
@@ -57,15 +66,23 @@ Item {
   }
   readonly property url wallpaper: root.backgroundPath === "" ? "" : Qt.resolvedUrl("file://" + root.backgroundPath)
 
-  // Only runs if omarchy.background is unavailable or has not resolved a path.
+  // With the service unreachable, readlink is the live source and nothing
+  // pushes theme changes at us. Rather than poll, consumers call this just
+  // before they show a thumbnail: theme switches are rare, hover is not, and a
+  // readlink is far cheaper than a timer that runs all session.
+  function refreshWallpaper() {
+    if (!backgroundProbe.running) backgroundProbe.running = true
+  }
+
   Process {
     id: backgroundProbe
-    running: root.backgroundService === null
     command: ["readlink", "-f", Quickshell.env("HOME") + "/.local/state/omarchy/current/background"]
     stdout: StdioCollector {
       onStreamFinished: root.fallbackBackgroundPath = String(text).trim()
     }
   }
+
+  Component.onCompleted: root.refreshWallpaper()
 
   // ------------------------------------------------------------------- frames
 

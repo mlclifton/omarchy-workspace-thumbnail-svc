@@ -11,25 +11,39 @@ cd "$(dirname "$0")/.."
 fail() { echo "fail: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
-# ---------------------------------------------------------------- manifest
-[[ -f manifest.json ]] || fail "manifest.json missing"
+# ------------------------------------------------------------ vendor fragment
+#
+# This repo is a vendored component, not an installable plugin, so it carries
+# no manifest.json of its own. It ships the fragment a consumer merges into
+# theirs. See IMPLEMENTATION.md, "Why this is vendored".
+[[ -f manifest.json ]] && fail "manifest.json must not exist - this repo is vendored, not installed"
+[[ -f manifest.fragment.json ]] || fail "manifest.fragment.json missing"
 command -v jq >/dev/null || fail "jq is required"
 
-id=$(jq -r .id manifest.json)
-[[ "$id" == "mlclifton.workspace-thumbnails" ]] || fail "manifest id is '$id'"
-[[ "$(jq -r .schemaVersion manifest.json)" == "1" ]] || fail "schemaVersion must be 1"
-jq -e '.kinds | index("service")' manifest.json >/dev/null || fail "kinds must include 'service'"
+jq -e . manifest.fragment.json >/dev/null || fail "manifest.fragment.json is not valid JSON"
+jq -e '.kinds | index("service")' manifest.fragment.json >/dev/null || fail "fragment kinds must include 'service'"
 
-entry=$(jq -r .entryPoints.service manifest.json)
-[[ -n "$entry" && "$entry" != "null" ]] || fail "entryPoints.service missing"
-[[ -f "$entry" ]] || fail "entryPoints.service points at missing file '$entry'"
-[[ "$entry" != /* && "$entry" != *..* ]] || fail "entryPoints.service must be a relative path inside the plugin"
-pass "manifest declares a service entry point at $entry"
+entry=$(jq -r '.entryPoints.service // ""' manifest.fragment.json)
+[[ -n "$entry" ]] || fail "fragment entryPoints.service missing"
+[[ "$entry" != /* && "$entry" != *..* ]] || fail "entryPoints.service must stay inside the consumer's plugin directory"
 
-for required in LICENSE README.md IMPLEMENTATION.md Service.qml WorkspaceThumbnail.qml WindowTile.qml lib/Geometry.js; do
+# The fragment points at the vendored copy, so strip the subdir to find the
+# file here. This is what catches the two drifting apart.
+[[ -f "${entry#*/}" ]] || fail "fragment entry '$entry' does not map to a file in this repo"
+pass "fragment declares a service entry point at $entry"
+
+for required in LICENSE README.md IMPLEMENTATION.md install.sh Service.qml WorkspaceThumbnail.qml WindowTile.qml lib/Geometry.js; do
   [[ -f "$required" ]] || fail "$required missing"
 done
+[[ -x install.sh ]] || fail "install.sh must be executable"
 pass "all expected files present"
+
+# install.sh must vendor exactly the files that exist, or a consumer gets a
+# half-copied component that fails at load time rather than here.
+for f in Service.qml WorkspaceThumbnail.qml WindowTile.qml lib/Geometry.js; do
+  grep -q "$f" install.sh || fail "install.sh does not vendor $f"
+done
+pass "install.sh vendors the whole runtime set"
 
 # ------------------------------------------------------------------ layering
 #
@@ -72,6 +86,14 @@ grep -q 'property var shell' Service.qml \
   || fail "Service.qml must expose 'shell' for omarchy-shell's service loader to inject"
 grep -q 'function frameFor' Service.qml || fail "Service.qml must expose frameFor()"
 grep -q 'thumbnailComponent' Service.qml || fail "Service.qml must expose thumbnailComponent"
+grep -q 'function refreshWallpaper' Service.qml \
+  || fail "Service.qml must expose refreshWallpaper() - nothing pushes theme changes at us any more"
 pass "service exposes the documented API"
+
+# The service must not assume it can reach another plugin. omarchy.background is
+# the one permitted attempt, and only because it degrades to the readlink probe.
+foreign=$(code_of Service.qml | grep -oE 'serviceFor\("[^"]+"\)' | grep -v 'omarchy.background' || true)
+[[ -z "$foreign" ]] || fail "Service.qml looks up a foreign service ($foreign); only its own id resolves since Omarchy 4.0.3"
+pass "service makes no unreachable cross-plugin lookups"
 
 echo "structure: ok"
